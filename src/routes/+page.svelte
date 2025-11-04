@@ -5,7 +5,7 @@
 	import DownloadIcon from 'lucide-svelte/icons/download';
 	import ExcelJS from 'exceljs';
 	import type { Column, Sheet, SourceRow, SyncConfig } from '$lib/types';
-
+	import { browser } from '$app/environment';
 	let sourceFile = $state.raw<FileList | undefined>(undefined);
 	let targetFiles = $state.raw<FileList | undefined>(undefined);
 	let fillEmptyOnNoMatch = $state<boolean>(true);
@@ -16,6 +16,12 @@
 	let ruleText = $state.raw<string>('');
 
 	let sourceWorkbook = $state.raw<ExcelJS.Workbook | undefined>(undefined);
+	let runningSync = $state<boolean>(false);
+
+	let predefinedRules = $state.raw<SyncConfig | undefined>(undefined);
+	if (browser) {
+		predefinedRules = (window as any).predefinedRules;
+	}
 
 	$effect(() => {
 		if (sourceFile && sourceFile.length > 0) {
@@ -59,19 +65,17 @@
 			return columnLetterToNumber(column);
 		}
 
-		if (column.type === 'match' && column.rules && column.rules.length > 0) {
-			for (var columnIndex = 1; columnIndex <= worksheet.columnCount; columnIndex++) {
-				var matched = true;
-				for (const rule of column.rules) {
-					if (worksheet.getCell(rule.row, columnIndex).value !== rule.value) {
-						matched = false;
-						break;
-					}
+		for (var columnIndex = 1; columnIndex <= worksheet.columnCount; columnIndex++) {
+			var matched = true;
+			for (const [row, value] of column.find_in_row) {
+				if (worksheet.getCell(row, columnIndex).value !== value) {
+					matched = false;
+					break;
 				}
-				if (matched) {
-					console.log(`Resolved column index ${columnIndex} for column ${JSON.stringify(column)}`);
-					return columnIndex;
-				}
+			}
+			if (matched) {
+				console.log(`Resolved column index ${columnIndex} for column ${JSON.stringify(column)}`);
+				return columnIndex;
 			}
 		}
 
@@ -85,52 +89,46 @@
 		rowDef: Exclude<SourceRow, 'same_with_previous_column'>,
 		sourceWorksheet: ExcelJS.Worksheet
 	): number {
-		if (rowDef.type === 'match' && rowDef.rules && rowDef.rules.length > 0) {
-			for (let rowNumber = 1; rowNumber <= sourceWorksheet.rowCount; rowNumber++) {
-				const row = sourceWorksheet.getRow(rowNumber);
+		for (let rowNumber = 1; rowNumber <= sourceWorksheet.rowCount; rowNumber++) {
+			const row = sourceWorksheet.getRow(rowNumber);
 
-				var matched = true;
+			var matched = true;
 
-				for (const rule of rowDef.rules) {
-					let targetMatchValue: ExcelJS.CellValue | undefined = undefined;
-					const targetMatchValueType = rule.target_value.type;
-					if (targetMatchValueType === 'current_row') {
-						targetMatchValue = targetWorksheet.getCell(
-							targetRowNumber,
-							rule.target_value.column as number
-						).value;
-						if (!targetMatchValue) {
-							console.warn(
-								`Resolve source row failed, target value at (${targetRowNumber}, ${rule.target_value.column as number}) is empty.`
-							);
-							return 0;
-						}
-					} else if (targetMatchValueType === 'current_column') {
-						targetMatchValue = targetWorksheet.getCell(
-							rule.target_value.row,
-							targetColumnNumber
-						).value;
-						if (!targetMatchValue) {
-							console.warn(
-								`Resolve source row failed, target value at (${rule.target_value.row}, ${targetColumnNumber}) is empty.`
-							);
-							return 0;
-						}
-					} else if (targetMatchValueType === 'fixed') {
-						targetMatchValue = rule.target_value.value;
-						if (!targetMatchValue) {
-							console.warn(`Resolve source row failed, fixed target value in rule is empty.`);
-							return 0;
-						}
+			for (const rule of rowDef.find_in_column) {
+				let targetMatchValue: ExcelJS.CellValue | undefined = undefined;
+				// const targetMatchValueType = rule.target_value[0];
+				if ('column_for_current_row' in rule.target_value) {
+					const columnIndex = rule.target_value.column_for_current_row as number;
+					targetMatchValue = targetWorksheet.getCell(targetRowNumber, columnIndex).value;
+					if (!targetMatchValue) {
+						console.warn(
+							`Resolve source row failed, target value at (${targetRowNumber}, ${columnIndex}) is empty.`
+						);
+						return 0;
 					}
-					if (targetMatchValue !== row.getCell(rule.source_column as number).value) {
-						matched = false;
-						break;
+				} else if ('row_for_current_column' in rule.target_value) {
+					const rowIndex = rule.target_value.row_for_current_column;
+					targetMatchValue = targetWorksheet.getCell(rowIndex, targetColumnNumber).value;
+					if (!targetMatchValue) {
+						console.warn(
+							`Resolve source row failed, target value at (${rowIndex}, ${targetColumnNumber}) is empty.`
+						);
+						return 0;
+					}
+				} else if ('fixed' in rule.target_value) {
+					targetMatchValue = rule.target_value.fixed;
+					if (!targetMatchValue) {
+						console.warn(`Resolve source row failed, fixed target value in rule is empty.`);
+						return 0;
 					}
 				}
-				if (matched) {
-					return rowNumber;
+				if (targetMatchValue !== row.getCell(rule.source_column as number).value) {
+					matched = false;
+					break;
 				}
+			}
+			if (matched) {
+				return rowNumber;
 			}
 		}
 
@@ -138,14 +136,15 @@
 	}
 
 	/** Helper function to read all rules from the UI and validate them. */
-	function getRulesFromUI(): SyncConfig {
-		let rules;
+	function getConfig(): SyncConfig {
+		if (predefinedRules) {
+			return predefinedRules;
+		}
 		try {
-			rules = JSON.parse(ruleText);
+			return JSON.parse(ruleText);
 		} catch (e) {
 			throw new Error('Invalid JSON format. Please check your rules syntax.');
 		}
-		return rules;
 	}
 
 	function getTargetConfigWithResolvedColumnIndexes({
@@ -178,27 +177,27 @@
 					`Source column match failed for rule ${columnStr} in source file. Check your rules.`
 				);
 			}
-			if (updateRule.source_value_coord.row !== 'same_with_previous_column') {
-				if (updateRule.source_value_coord.row.type === 'match') {
-					for (const rule of updateRule.source_value_coord.row.rules) {
-						columnStr = JSON.stringify(rule.source_column);
-						rule.source_column = resolveColumnIndex(sourceWorksheet, rule.source_column);
-						if (rule.source_column <= 0) {
+			if (
+				typeof updateRule.source_value_coord.row === 'object' &&
+				'find_in_column' in updateRule.source_value_coord.row
+			) {
+				for (const rule of updateRule.source_value_coord.row.find_in_column) {
+					columnStr = JSON.stringify(rule.source_column);
+					rule.source_column = resolveColumnIndex(sourceWorksheet, rule.source_column);
+					if (rule.source_column <= 0) {
+						throw new Error(
+							`Source column match failed for rule ${columnStr} in source file. Check your rules.`
+						);
+					}
+					if ('column_for_current_row' in rule.target_value) {
+						const column = rule.target_value.column_for_current_row;
+						columnStr = JSON.stringify(column);
+						const resolvedColumnIndex = resolveColumnIndex(targetWorksheet, column);
+						rule.target_value.column_for_current_row = resolvedColumnIndex;
+						if (resolvedColumnIndex <= 0) {
 							throw new Error(
-								`Source column match failed for rule ${columnStr} in source file. Check your rules.`
+								`Target column match failed for rule ${columnStr} in ${targetFileName}. Check your rules.`
 							);
-						}
-						if (rule.target_value.type === 'current_row') {
-							columnStr = JSON.stringify(rule.target_value.column);
-							rule.target_value.column = resolveColumnIndex(
-								targetWorksheet,
-								rule.target_value.column
-							);
-							if (rule.target_value.column <= 0) {
-								throw new Error(
-									`Target column match failed for rule ${columnStr} in ${targetFileName}. Check your rules.`
-								);
-							}
 						}
 					}
 				}
@@ -220,7 +219,7 @@
 
 		let syncConfig: SyncConfig;
 		try {
-			syncConfig = getRulesFromUI();
+			syncConfig = getConfig();
 		} catch (e) {
 			alert((e as Error).message);
 			return;
@@ -236,6 +235,7 @@
 		}
 
 		// 2. Iterate through each target file, process it, and trigger download
+		runningSync = true;
 		for (const targetFile of targetFiles!) {
 			let fileUpdatedCells = 0;
 
@@ -330,6 +330,7 @@
 				});
 			}
 		}
+		runningSync = false;
 	}
 
 	/** Downloads a generated Excel file from a buffer. */
@@ -402,51 +403,53 @@
 	</div>
 
 	<!-- Step 2: Rule Configuration -->
-	<div class="mb-8 border-b border-gray-200 pb-8">
+	<div class="mb-8 border-b border-gray-200 pb-8" class:hidden={predefinedRules}>
 		<h2 class="mb-4 flex items-center text-xl font-semibold text-gray-700">
 			<CodeXmlIcon class="mr-2 h-6 w-6 text-blue-500" />
 			3. Define Rules
 		</h2>
 
-		<div class="mb-4">
+		<div>
 			<textarea
 				bind:value={ruleText}
 				rows="10"
 				class="w-full rounded-lg border border-gray-300 p-3 font-mono text-sm focus:border-blue-500 focus:ring-blue-500"
 			></textarea>
-			<div class="flex items-center">
-				<input
-					id="fill-empty-on-no-match"
-					type="checkbox"
-					bind:checked={fillEmptyOnNoMatch}
-					class="h-4 w-4 rounded border-gray-300 text-blue-600 focus:ring-blue-500"
-				/>
-				<label for="fill-empty-on-no-match" class="ml-3 text-sm font-medium text-gray-700">
-					Clear target cell if not found source value.
-				</label>
-			</div>
 		</div>
 	</div>
 
 	<!-- Step 3: Run -->
-	<div>
+	<div class="mb-4">
+		<div class="mb-4 flex items-center">
+			<input
+				id="fill-empty-on-no-match"
+				type="checkbox"
+				bind:checked={fillEmptyOnNoMatch}
+				class="h-4 w-4 rounded border-gray-300 text-blue-600 focus:ring-blue-500"
+			/>
+			<label for="fill-empty-on-no-match" class="ml-3 text-sm font-medium text-gray-700">
+				Clear target cell if no source value found.
+			</label>
+		</div>
 		<button
 			class="flex w-full items-center justify-center gap-2
 			rounded-xl bg-blue-600 px-6 py-3 text-lg font-bold text-white
 			shadow-lg transition hover:bg-blue-700 hover:shadow-xl focus:ring-4 focus:ring-blue-300 focus:outline-none"
 			onclick={runSync}
+			disabled={runningSync}
 		>
 			<DownloadIcon class="mr-2 inline h-5 w-5" />
-			4. Run Sync & Download
+			Run Sync & Download
 		</button>
 	</div>
 
 	<!-- Status Message Box -->
 	<div>
 		{#each syncResult as result}
-			<div class="mb-4 rounded-lg border border-gray-200 p-4">
+			<div class="mb-4 flex flex-row items-center gap-2 rounded-lg border border-gray-200 p-4">
 				<h3 class="text-lg font-semibold text-gray-700">{result.targetFileName}</h3>
 				<p class="text-sm text-gray-500">{result.updatedCells} cells updated</p>
+				<div class="flex-1"></div>
 				{#if result.success}
 					<p class="text-green-500">Success</p>
 				{:else}
