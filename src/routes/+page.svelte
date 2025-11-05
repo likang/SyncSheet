@@ -6,6 +6,7 @@
 	import ExcelJS from 'exceljs';
 	import type { Column, Sheet, SourceRow, SyncConfig } from '$lib/types';
 	import { browser } from '$app/environment';
+	import Documentation from '$lib/components/Documentation.svelte';
 	let sourceFile = $state.raw<FileList | undefined>(undefined);
 	let targetFiles = $state.raw<FileList | undefined>(undefined);
 	let fillEmptyOnNoMatch = $state<boolean>(true);
@@ -469,3 +470,4 @@
 		{/each}
 	</div>
 </div>
+<Documentation />
