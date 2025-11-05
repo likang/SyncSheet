@@ -1,23 +1,19 @@
 export type SyncConfig = {
 	sync_type: 'update_target'; // update the target file with the source file
-	update_target: {
+	update_targets: {
 		rule_type: 'advanced';
-		source: {
-			sheet: Sheet;
-		};
-		target: {
-			sheet: Sheet;
-			start_row: number; // 1-based
-			end_row: number | undefined; // 1-based
-			update_columns: {
-				column: Column; // column in target sheet
-				source_value_coord: {
-					row: SourceRow; // row in source sheet
-					column: Column; // column in source sheet
-				};
-			}[];
-		};
-	};
+		source_sheet: Sheet;
+		target_sheet: Sheet;
+		start_row: number; // 1-based
+		end_row: number | undefined; // 1-based
+		update_columns: {
+			target_column: Column; // column in target sheet
+			source_value_coord: {
+				row: SourceRow; // row in source sheet
+				column: Column; // column in source sheet
+			};
+		}[];
+	}[];
 };
 
 export type Sheet = string | number; // sheet name or index (1-based)

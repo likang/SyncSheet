@@ -148,21 +148,21 @@
 	}
 
 	function getTargetConfigWithResolvedColumnIndexes({
-		syncConfig,
+		updateTarget,
 		targetWorksheet,
 		sourceWorksheet,
 		targetFileName
 	}: {
-		syncConfig: SyncConfig;
+		updateTarget: SyncConfig['update_targets'][number];
 		targetWorksheet: ExcelJS.Worksheet;
 		sourceWorksheet: ExcelJS.Worksheet;
 		targetFileName: string;
-	}): typeof syncConfig.update_target.target {
-		const targetConfig = structuredClone(syncConfig.update_target.target);
+	}): typeof updateTarget {
+		const targetConfig = structuredClone(updateTarget);
 		for (const updateRule of targetConfig.update_columns) {
-			var columnStr = JSON.stringify(updateRule.column);
-			updateRule.column = resolveColumnIndex(targetWorksheet, updateRule.column);
-			if (updateRule.column <= 0) {
+			var columnStr = JSON.stringify(updateRule.target_column);
+			updateRule.target_column = resolveColumnIndex(targetWorksheet, updateRule.target_column);
+			if (updateRule.target_column <= 0) {
 				throw new Error(
 					`Target column match failed for rule ${columnStr} in ${targetFileName}. Check your rules.`
 				);
@@ -225,17 +225,9 @@
 			return;
 		}
 
-		const sourceConfig = syncConfig.update_target.source;
-
-		const sourceWorksheet = resolveSheet(sourceWorkbook, sourceConfig.sheet);
-		if (!sourceWorksheet) {
-			throw new Error(
-				`Could not find the specified source sheet in ${sourceFile![0].name}. Check your rules.`
-			);
-		}
-
 		// 2. Iterate through each target file, process it, and trigger download
 		runningSync = true;
+		syncResult = [];
 		for (const targetFile of targetFiles!) {
 			let fileUpdatedCells = 0;
 
@@ -245,68 +237,79 @@
 				const workbook = new ExcelJS.Workbook();
 				await workbook.xlsx.load(buffer);
 
-				// Get Target Worksheet
-				const targetWorksheet = resolveSheet(workbook, syncConfig.update_target.target.sheet);
-				if (!targetWorksheet) {
-					throw new Error(
-						`Could not find the specified target sheet in ${targetFile.name}. Check your rules.`
-					);
-				}
+				for (const updateTarget of syncConfig.update_targets) {
+					const sourceWorksheet = resolveSheet(sourceWorkbook, updateTarget.source_sheet);
+					if (!sourceWorksheet) {
+						throw new Error(
+							`Could not find the specified source sheet in ${sourceFile![0].name}. Check your rules.`
+						);
+					}
 
-				const targetConfig = getTargetConfigWithResolvedColumnIndexes({
-					syncConfig,
-					targetWorksheet,
-					sourceWorksheet,
-					targetFileName: targetFile.name
-				});
+					// Get Target Worksheet
+					const targetWorksheet = resolveSheet(workbook, updateTarget.target_sheet);
+					if (!targetWorksheet) {
+						throw new Error(
+							`Could not find the specified target sheet in ${targetFile.name}. Check your rules.`
+						);
+					}
 
-				// 3. Iterate through target rows and apply rules IN PLACE
-				for (
-					let rowNumber = targetConfig.start_row;
-					rowNumber <= (targetConfig.end_row || targetWorksheet.rowCount);
-					rowNumber++
-				) {
-					let lastRuleSourceRow: number = 0; // Memory for "same_with_previous_column" within the row
+					const targetConfig = getTargetConfigWithResolvedColumnIndexes({
+						updateTarget,
+						targetWorksheet,
+						sourceWorksheet,
+						targetFileName: targetFile.name
+					});
 
-					for (const updateRule of targetConfig.update_columns) {
-						// A. Resolve Source Row
-						const sourceRowDef = updateRule.source_value_coord.row;
-						let sourceRowIndex;
+					// 3. Iterate through target rows and apply rules IN PLACE
+					for (
+						let rowNumber = targetConfig.start_row;
+						rowNumber <= (targetConfig.end_row || targetWorksheet.rowCount);
+						rowNumber++
+					) {
+						let lastRuleSourceRow: number = 0; // Memory for "same_with_previous_column" within the row
 
-						if (sourceRowDef === 'same_with_previous_column') {
-							sourceRowIndex = lastRuleSourceRow;
-						} else {
-							sourceRowIndex = resolveSourceRowIndex(
-								targetWorksheet,
-								rowNumber,
-								updateRule.column as number,
-								sourceRowDef,
-								sourceWorksheet
-							);
-							// This is the crucial step: store the resolved row for subsequent rules
-							lastRuleSourceRow = sourceRowIndex;
-						}
+						for (const updateRule of targetConfig.update_columns) {
+							// A. Resolve Source Row
+							const sourceRowDef = updateRule.source_value_coord.row;
+							let sourceRowIndex;
 
-						if (sourceRowIndex <= 0) {
-							// not found
-							if (fillEmptyOnNoMatch) {
-								targetWorksheet.getRow(rowNumber).getCell(updateRule.column as number).value = null;
+							if (sourceRowDef === 'same_with_previous_column') {
+								sourceRowIndex = lastRuleSourceRow;
 							} else {
-								// Source row match failed for this rule, skip update for this column/row.
-								console.warn(
-									`Skipped: (${rowNumber}, ${updateRule.column}) in ${targetFile.name}, can not find matched row in source file.`
+								sourceRowIndex = resolveSourceRowIndex(
+									targetWorksheet,
+									rowNumber,
+									updateRule.target_column as number,
+									sourceRowDef,
+									sourceWorksheet
 								);
+								// This is the crucial step: store the resolved row for subsequent rules
+								lastRuleSourceRow = sourceRowIndex;
 							}
-						} else {
-							const sourceCell = sourceWorksheet
-								.getRow(sourceRowIndex)
-								.getCell(updateRule.source_value_coord.column as number);
-							const targetCell = targetWorksheet
-								.getRow(rowNumber)
-								.getCell(updateRule.column as number);
 
-							targetCell.value = sourceCell.value;
-							fileUpdatedCells++;
+							if (sourceRowIndex <= 0) {
+								// not found
+								if (fillEmptyOnNoMatch) {
+									targetWorksheet
+										.getRow(rowNumber)
+										.getCell(updateRule.target_column as number).value = null;
+								} else {
+									// Source row match failed for this rule, skip update for this column/row.
+									console.warn(
+										`Skipped: (${rowNumber}, ${updateRule.target_column}) in ${targetFile.name}, can not find matched row in source file.`
+									);
+								}
+							} else {
+								const sourceCell = sourceWorksheet
+									.getRow(sourceRowIndex)
+									.getCell(updateRule.source_value_coord.column as number);
+								const targetCell = targetWorksheet
+									.getRow(rowNumber)
+									.getCell(updateRule.target_column as number);
+
+								targetCell.value = sourceCell.value;
+								fileUpdatedCells++;
+							}
 						}
 					}
 				}
@@ -319,9 +322,16 @@
 				// 4. Convert the updated workbook back to a buffer
 				const newBuffer = await workbook.xlsx.writeBuffer();
 
+				const now = new Date();
+				const pad = (n: number) => n.toString().padStart(2, '0');
+				const yyyy = now.getFullYear();
+				const mm = pad(now.getMonth() + 1);
+				const dd = pad(now.getDate());
+				const todayStr = `${yyyy}${mm}${dd}`;
 				// 5. Trigger download for this file
-				downloadFile(newBuffer, `Advanced_Updated_${targetFile.name}`);
+				downloadFile(newBuffer, `${todayStr}_${targetFile.name}`);
 			} catch (err) {
+				console.error(err);
 				syncResult.push({
 					targetFileName: targetFile.name,
 					updatedCells: 0,
